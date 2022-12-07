@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync, default as fs } from "fs";
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync, linkSync, unlinkSync, default as fs, link } from "fs";
 import { run } from "jest";
 import path from "path";
 import { randomBytes } from "crypto";
@@ -8,8 +8,6 @@ const ALLOWED_DESCRIPTOR_CHARS = ["0", "1", "2", "3", "4" ,"5" ,"6", "7", "8", "
     "S", "T", "U", "V", "W", "X", "Y", "Z", "a", "b", "c", "d", "e", "f", "g", "h", "i",
     "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
     "."] as const;
-
-const TMP_FOLDER = "./.inlinetest";
 
 type Dir = "." | ".." | `/${typeof ALLOWED_DESCRIPTOR_CHARS[number]}`;
 // Adding a message with never informs the user when they get curious about the error and dive deep into code
@@ -23,12 +21,20 @@ interface ModuleMayHaveUnitTests {
     unitTests?: () => void;
 }
 
-const getFilePaths = (dir: string): string[] => {
+type FilePath = {
+    dir: string;
+    filePath: string;
+}
+
+const getFilePaths = (dir: string): FilePath[] => {
     const listOfFileDescriptors = readdirSync(path.join(__dirname, dir), { withFileTypes: true });
     const codeFiles = [];
     for (const descriptor of listOfFileDescriptors) {
         if (descriptor.isFile() && [".js", ".ts"].includes(path.extname(descriptor.name))) {
-            codeFiles.push(path.join(__dirname, dir, descriptor.name));
+            codeFiles.push({
+                dir: path.join(__dirname, dir),
+                filePath: path.join(__dirname, dir, descriptor.name)
+            });
         }
 
         if (descriptor.isDirectory()) {
@@ -46,13 +52,20 @@ const getUnitTests = (module: ModuleMayHaveUnitTests): UnitTestFunction | undefi
     }
 };
 
-const createTemporaryFile = (filePath: string) => {
+const createTemporaryFile = (filePath: string, dir: string) => {
     let file = readFileSync(filePath).toString();
     file += "\nunitTests();";
-    mkdirSync(TMP_FOLDER, { recursive: true });
-    const newFilePath = `${TMP_FOLDER}/${randomBytes(6).toString("hex")}.test.js`;
-    writeFileSync(newFilePath, file, { flag: "w+" });
-    return newFilePath;
+    const filename = `${randomBytes(6).toString("hex")}_inline.test.ts`;
+    const newFilePath = `/tmp/${filename}`;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(newFilePath, file);
+    linkSync(newFilePath, dir + "/" + filename);
+    return {
+        newFilePath,
+        filename,
+        dir,
+        file,
+    };
 };
 
 export const main = async <T>(mainPath: Path<T>) => {
@@ -60,33 +73,42 @@ export const main = async <T>(mainPath: Path<T>) => {
         throw new Error("Provided tests path is not a string.");
     }
 
+    const createdFiles = [];
+
     try {
         const codeFilePaths = getFilePaths(mainPath);
         for (const filePath of codeFilePaths) {
-            const codeFileWithTest = await import(filePath);
+            const codeFileWithTest = await import(filePath.filePath);
             const unitTests = getUnitTests(codeFileWithTest);
             if (unitTests) {
-                createTemporaryFile(filePath);
+                const createdFilePath = createTemporaryFile(filePath.filePath, filePath.dir);
+                createdFiles.push(createdFilePath);
             }
         }
         await run();
     } finally {
-        rmSync(".inlinetest");
+        for (const { dir, filename } of createdFiles) {
+            unlinkSync(path.join(dir, filename));
+        }
     }
 };
-
-console.log(this);
 
 // ~Tests
 export const unitTests = () => {
     describe("InlineTest tests", () => {
         describe("getFilePaths", () => {
-            it("should return file paths successfuly", () => {
-                jest.spyOn(fs, "readdirSync");
-                jest.spyOn(fs.Dirent.prototype, "isFile").mockImplementation(() => true);
-                jest.spyOn(fs, "readdirSync");
-                jest.spyOn(fs, "readdirSync");
-                expect(() => getFilePaths("./src/code.js")).toBeTruthy();
+            it("should return file paths successfuly in a flat directory", () => {
+                jest.spyOn(fs, "readdirSync").mockImplementation(() => (
+                    [
+                        {
+                            name: "examplecode.ts",
+                            isFile: () => true,
+                            isDirectory: () => false,
+                        }
+                    ] as any));
+                expect(getFilePaths("./code.js")).toHaveLength(1);
+
+                jest.clearAllMocks();
             });
         });
     });
